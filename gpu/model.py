@@ -17,10 +17,13 @@ from xformers.ops.fmha.attn_bias import (
 
 import ctypes
 import os
-# Local fix (bitnet-pruebas, Windows): upstream only ships a .so name
-bitnet_lib = ctypes.CDLL(
-    'bitnet_kernels/bitnet_kernels.dll' if os.name == 'nt'
-    else 'bitnet_kernels/libbitnet.so')
+# Local fix (bitnet-pruebas, Windows): upstream only ships a .so name.
+# Resolve relative to this file so any CWD works.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_LIB = os.path.join(
+    _HERE, 'bitnet_kernels',
+    'bitnet_kernels.dll' if os.name == 'nt' else 'libbitnet.so')
+bitnet_lib = ctypes.CDLL(_LIB)
 
 def bitnet_int8xint2_linear(input0, input1, s, ws):
     out_shape = list(input0.shape)

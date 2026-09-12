@@ -12,9 +12,12 @@ torch.manual_seed(42)
 np.random.seed(42)
 
 bitnet_lib = ctypes.CDLL(
-    # Local fix (bitnet-pruebas, Windows): upstream only ships a .so name
-    'bitnet_kernels/bitnet_kernels.dll' if os.name == 'nt'
-    else 'bitnet_kernels/libbitnet.so')
+    # Local fix (bitnet-pruebas, Windows): upstream only ships a .so name.
+    # Resolved relative to this file so any CWD works.
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 'bitnet_kernels',
+                 'bitnet_kernels.dll' if os.name == 'nt'
+                 else 'libbitnet.so'))
 
 def bitnet_int8xint2_linear(input0, input1, s, ws, ret):
     out_shape = list(input0.shape)
