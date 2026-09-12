@@ -42,6 +42,31 @@ add_subdirectory(src)
 set(LLAMA_BUILD_SERVER ON CACHE BOOL "Build llama.cpp server" FORCE)
 add_subdirectory(3rdparty/llama.cpp)
 
+# Local build fix (bitnet-pruebas): src/CMakeLists.txt only sets
+# GGML_SOURCES_BITNET (overwritten twice, never consumed), so the ternary
+# kernels are never compiled and ggml-base.dll fails to link
+# (undefined quantize_i2_s / dequantize_row_i2_s; the latter is shimmed in
+# src/ggml-bitnet-shim.c, see that file). The kernels live in their own
+# static lib so they can carry -march=native (required by gemm-config.h for
+# ROW/COL_BLOCK_SIZE and PARALLEL_SIZE, QK_I2_S=128 AVX2 path, same layout
+# as ggml-cpu-i2s.c) while the rest of ggml-base keeps default flags
+# exactly like upstream.
+add_library(ggml-bitnet-kernels STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-bitnet-mad.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-bitnet-lut.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-bitnet-shim.c
+)
+target_include_directories(ggml-bitnet-kernels PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/src/ggml-cpu
+)
+target_compile_options(ggml-bitnet-kernels PRIVATE "-march=native")
+if (TARGET ggml-base)
+    target_link_libraries(ggml-base PRIVATE ggml-bitnet-kernels)
+endif()
+
 # install
 
 include(GNUInstallDirs)
