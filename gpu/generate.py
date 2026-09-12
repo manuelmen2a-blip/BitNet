@@ -5,7 +5,10 @@
 
 import json
 import os
-import readline  # type: ignore # noqa
+try:
+    import readline  # type: ignore # noqa
+except ImportError:  # Windows has no readline; only needed for interactive REPL
+    readline = None  # type: ignore
 import sys
 import time
 from dataclasses import dataclass

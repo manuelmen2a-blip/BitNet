@@ -16,7 +16,11 @@ from xformers.ops.fmha.attn_bias import (
 )
 
 import ctypes
-bitnet_lib = ctypes.CDLL('bitnet_kernels/libbitnet.so')
+import os
+# Local fix (bitnet-pruebas, Windows): upstream only ships a .so name
+bitnet_lib = ctypes.CDLL(
+    'bitnet_kernels/bitnet_kernels.dll' if os.name == 'nt'
+    else 'bitnet_kernels/libbitnet.so')
 
 def bitnet_int8xint2_linear(input0, input1, s, ws):
     out_shape = list(input0.shape)
@@ -151,8 +155,11 @@ class Attention(nn.Module):
             theta=self.rope_theta,
         )
 
+        # Local fix (bitnet-pruebas): upstream forces flash.FwOp, which has no
+        # built backend on Windows/sm_86 wheels. Auto-dispatch picks
+        # cutlassF-pt / triton_splitKF instead.
         output = fmha.memory_efficient_attention_forward(
-            xq, cache_k, cache_v, attn_bias, op = fmha.flash.FwOp
+            xq, cache_k, cache_v, attn_bias, op=None
         )
 
         output = output.reshape(output_shape)
