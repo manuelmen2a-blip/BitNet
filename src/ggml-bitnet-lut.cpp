@@ -189,4 +189,50 @@ int ggml_bitnet_get_type_bits(enum ggml_type type) {
     }
 }
 
+void ggml_bitnet_mul_mat(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
+    const struct ggml_tensor * src0 = dst->src[0];
+    const struct ggml_tensor * src1 = dst->src[1];
+
+    const size_t ne00 = src0->ne[0];
+    const size_t ne01 = src0->ne[1];
+    const size_t ne10 = src1->ne[0];
+    const size_t ne11 = src1->ne[1];
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+    const int bits = ggml_bitnet_get_type_bits(src0->type);
+
+    struct bitnet_tensor_extra * extra = (struct bitnet_tensor_extra *)src0->extra;
+    GGML_ASSERT(extra != nullptr);
+
+    char * wdata = (char *)params->wdata;
+    const size_t wsize_per_thread = ggml_bitnet_mul_mat_get_wsize(src0, src1, dst);
+
+    int8_t  * qlut  = (int8_t  *)(wdata);
+    bitnet_float_type * lut_scales = (bitnet_float_type *)(qlut + ne10 * ne11 * 11);
+    bitnet_float_type * lut_biases = (bitnet_float_type *)(lut_scales + ne11);
+
+    if (ith == 0) {
+        ggml_bitnet_mul_mat_task_init(
+            (void *)((char *)src1->data),
+            (void *)qlut,
+            (void *)lut_scales,
+            (void *)lut_biases,
+            ne10, ne00, ne11, bits);
+    }
+
+    if (nth > 1) {
+        ggml_barrier(params->threadpool);
+    }
+
+    ggml_bitnet_mul_mat_task_compute(
+        (void *)extra->qweights,
+        (void *)extra->scales,
+        (void *)qlut,
+        (void *)lut_scales,
+        (void *)lut_biases,
+        (void *)((char *)dst->data),
+        ne10, ne00, ne11, bits);
+}
+
 #endif

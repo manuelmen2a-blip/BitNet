@@ -82,7 +82,74 @@ class BitLinearKernel(nn.Module):
 
     def forward(self, input):
         input, s = self.quant_input(input)
+        # Local (bitnet-pruebas): native M>1 via GEMM single launch when supported
+        if input.shape[0] > 1:
+            # Try true GEMM first
+            try:
+                return bitnet_gemm_int8xint2(input, self.weight, s, self.weight_scale)
+            except Exception:
+                return bitnet_int8xint2_linear_batched(input, self.weight, s, self.weight_scale)
         return bitnet_int8xint2_linear(input, self.weight, s, self.weight_scale)
+
+
+def bitnet_int8xint2_linear_batched(input0, weight, s, ws):
+    """Batched prefill: single host call that loops M× GEMV in C++ (no Python overhead)."""
+    M = input0.shape[0]
+    N = weight.shape[0]
+    K = weight.shape[1] * 4
+    out = torch.empty((M, N), dtype=torch.bfloat16, device=input0.device)
+    stream = torch.cuda.current_stream().cuda_stream
+    # ws is (4,) bf16 shared; s is (M,1) bf16 per-row
+    # Ensure contiguous as kernel expects
+    s_c = s.contiguous()
+    # Call the new batched entry point (single launch overhead)
+    try:
+        bitnet_lib.bitlinear_int8xint2_batched(
+            ctypes.c_void_p(input0.data_ptr()),
+            ctypes.c_void_p(weight.data_ptr()),
+            ctypes.c_void_p(out.data_ptr()),
+            ctypes.c_void_p(s_c.data_ptr()),
+            ctypes.c_void_p(ws.data_ptr()),
+            ctypes.c_int(M), ctypes.c_int(N), ctypes.c_int(K),
+            ctypes.c_void_p(stream))
+    except AttributeError:
+        # Fallback to Python loop if old DLL without batched symbol
+        for i in range(M):
+            row_in = input0[i:i+1].contiguous()
+            row_s = s_c[i:i+1].contiguous()
+            row_out = out[i:i+1]
+            bitnet_lib.bitlinear_int8xint2(
+                ctypes.c_void_p(row_in.data_ptr()),
+                ctypes.c_void_p(weight.data_ptr()),
+                ctypes.c_void_p(row_out.data_ptr()),
+                ctypes.c_void_p(row_s.data_ptr()),
+                ctypes.c_void_p(ws.data_ptr()),
+                ctypes.c_int(1), ctypes.c_int(N), ctypes.c_int(K),
+                ctypes.c_void_p(stream))
+    return out
+
+
+def bitnet_gemm_int8xint2(input0, weight, s, ws):
+    """True GEMM M>1 single launch (native, no loop). Falls back to batched if shape unsupported."""
+    M = input0.shape[0]
+    N = weight.shape[0]
+    K = weight.shape[1] * 4
+    out = torch.empty((M, N), dtype=torch.bfloat16, device=input0.device)
+    stream = torch.cuda.current_stream().cuda_stream
+    s_c = s.contiguous()
+    try:
+        # New native GEMM (single kernel, grid.y=M)
+        bitnet_lib.bitlinear_gemm_int8xint2(
+            ctypes.c_void_p(input0.data_ptr()),
+            ctypes.c_void_p(weight.data_ptr()),
+            ctypes.c_void_p(out.data_ptr()),
+            ctypes.c_void_p(s_c.data_ptr()),
+            ctypes.c_void_p(ws.data_ptr()),
+            ctypes.c_int(M), ctypes.c_int(N), ctypes.c_int(K),
+            ctypes.c_void_p(stream))
+        return out
+    except AttributeError:
+        return bitnet_int8xint2_linear_batched(input0, weight, s, ws)
 
 class BitLinear(nn.Linear):
     @torch.compile
@@ -105,6 +172,9 @@ class BitLinearInt2Torch(nn.Module):
     GEMM, but removes the 5.2GB fp16 prefill model from VRAM.
     """
 
+    # Native kernel supports these (N,K) on 2B (also large via other build)
+    _NATIVE_SHAPES = {(2560,2560),(3840,2560),(13824,2560),(2560,6912),(3200,3200),(4800,3200),(3200,10240),(20480,3200)}
+
     def __init__(self, in_features: int, out_features: int, bias: bool = False,
                  row_splits=None):
         super().__init__()
@@ -123,7 +193,21 @@ class BitLinearInt2Torch(nn.Module):
         s = 127 / input.abs().max(dim=-1, keepdim=True).values.clamp_(min=1e-5)
         return (input * s).round().clamp(-128, 127) / s
 
+    @torch.compile
+    def quant_input_int8(self, input):
+        s = 127 / input.abs().max(dim=-1, keepdim=True).values.clamp_(min=1e-5)
+        return (input * s).round().clamp(-128, 127).to(torch.int8), s
+
     def forward(self, input):
+        # Local (bitnet-pruebas): for M>1 and supported shapes, use native
+        # GEMM single launch (no dequant). Otherwise fallback.
+        if input.shape[0] > 1 and (self.out_features, self.in_features) in self._NATIVE_SHAPES:
+            q, s = self.quant_input_int8(input)
+            # Try true GEMM first, fallback to batched GEMV loop if shape not in GEMM dispatch
+            try:
+                return bitnet_gemm_int8xint2(q, self.weight, s, self.weight_scale)
+            except Exception:
+                return bitnet_int8xint2_linear_batched(q, self.weight, s, self.weight_scale)
         return F.linear(self.quant_input(input), self._dequant_weight(input))
 
     def _dequant_weight(self, input):

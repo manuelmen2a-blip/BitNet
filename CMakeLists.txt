@@ -46,25 +46,28 @@ add_subdirectory(3rdparty/llama.cpp)
 # GGML_SOURCES_BITNET (overwritten twice, never consumed), so the ternary
 # kernels are never compiled and ggml-base.dll fails to link
 # (undefined quantize_i2_s / dequantize_row_i2_s; the latter is shimmed in
-# src/ggml-bitnet-shim.c, see that file). The kernels live in their own
-# static lib so they can carry -march=native (required by gemm-config.h for
-# ROW/COL_BLOCK_SIZE and PARALLEL_SIZE, QK_I2_S=128 AVX2 path, same layout
-# as ggml-cpu-i2s.c) while the rest of ggml-base keeps default flags
-# exactly like upstream.
-add_library(ggml-bitnet-kernels STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-bitnet-mad.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-bitnet-lut.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-bitnet-shim.c
-)
-target_include_directories(ggml-bitnet-kernels PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/src/ggml-cpu
-)
-target_compile_options(ggml-bitnet-kernels PRIVATE "-march=native")
+# src/ggml-bitnet-shim.c). Compile the I2_S kernels directly into ggml-base
+# with -march=native (required by gemm-config.h).
 if (TARGET ggml-base)
-    target_link_libraries(ggml-base PRIVATE ggml-bitnet-kernels)
+    target_sources(ggml-base PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-bitnet-mad.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-bitnet-shim.c
+    )
+    if (GGML_BITNET_X86_TL2 OR GGML_BITNET_ARM_TL1)
+        target_sources(ggml-base PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml-bitnet-lut.cpp
+        )
+    endif()
+    target_include_directories(ggml-base PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/src/ggml-cpu
+    )
+    # gemm-config.h needs AVX to define PARALLEL_SIZE; apply to whole
+    # ggml-base (only affects this build, not upstream's other targets).
+    target_compile_options(ggml-base PRIVATE "-march=native")
+    target_compile_definitions(ggml-base PRIVATE GGML_BUILD)
 endif()
 
 # install
