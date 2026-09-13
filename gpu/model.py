@@ -54,6 +54,9 @@ class ModelArgs:
     norm_eps: float = 1e-5
     rope_theta: float = 500000.0
     use_kernel: bool = False
+    # Local (bitnet-pruebas): prefill with int2 weights via torch fallback
+    # instead of the fp16 model (saves ~5GB VRAM). Requires the int2 ckpt.
+    int2_torch: bool = False
 
 
 LayerCache = Tuple[torch.Tensor, torch.Tensor]
@@ -91,6 +94,44 @@ class BitLinear(nn.Linear):
         input = self.quant_input(input)
         return F.linear(input, self.weight)
 
+
+class BitLinearInt2Torch(nn.Module):
+    """Prefill with int2 weights, torch fallback (no fp16 model in VRAM).
+
+    Holds the SAME buffers as BitLinearKernel (packed int8 weight +
+    weight_scale), so the int2 checkpoint loads directly. Forward inverts
+    the packing (see int2_fallback.py), then runs the exact same
+    int8-rounded-activation GEMM as BitLinear. Slower than a native int2
+    GEMM, but removes the 5.2GB fp16 prefill model from VRAM.
+    """
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = False,
+                 row_splits=None):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.row_splits = row_splits
+
+        self.weight = torch.nn.Parameter(
+            torch.zeros(out_features, in_features // 4, dtype=torch.int8),
+            requires_grad=False)
+        self.weight_scale = torch.nn.Parameter(
+            torch.zeros(4, dtype=torch.bfloat16), requires_grad=False)
+
+    @torch.compile
+    def quant_input(self, input):
+        s = 127 / input.abs().max(dim=-1, keepdim=True).values.clamp_(min=1e-5)
+        return (input * s).round().clamp(-128, 127) / s
+
+    def forward(self, input):
+        return F.linear(self.quant_input(input), self._dequant_weight(input))
+
+    def _dequant_weight(self, input):
+        from int2_fallback import dequantize_int2_weight
+        return dequantize_int2_weight(
+            self.weight, self.weight_scale, self.row_splits,
+            out_dtype=input.dtype)
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -101,6 +142,7 @@ class Attention(nn.Module):
         rope_theta: float,
         norm_eps: float,
         use_kernel: bool,
+        int2_torch: bool = False,
     ):
         super().__init__()
 
@@ -112,16 +154,27 @@ class Attention(nn.Module):
 
         Linear = BitLinearKernel if use_kernel else BitLinear
 
-        self.wqkv = Linear(
-            dim,
-            (self.n_local_heads + 2 * self.n_local_kv_heads) * head_dim,
-            bias=False,
-        )
-        self.wo = Linear(
-            self.n_local_heads * head_dim,
-            dim,
-            bias=False,
-        )
+        if int2_torch:
+            nq = self.n_local_heads * head_dim
+            nkv = self.n_local_kv_heads * head_dim
+            self.wqkv = BitLinearInt2Torch(
+                dim, nq + 2 * nkv, bias=False,
+                row_splits=[nq, nkv, nkv],
+            )
+            self.wo = BitLinearInt2Torch(
+                self.n_local_heads * head_dim, dim, bias=False,
+            )
+        else:
+            self.wqkv = Linear(
+                dim,
+                (self.n_local_heads + 2 * self.n_local_kv_heads) * head_dim,
+                bias=False,
+            )
+            self.wo = Linear(
+                self.n_local_heads * head_dim,
+                dim,
+                bias=False,
+            )
 
         self.attn_sub_norm = RMSNorm(dim, norm_eps)
 
@@ -182,21 +235,31 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         norm_eps: float,
         use_kernel: bool,
+        int2_torch: bool = False,
     ):
         super().__init__()
 
         Linear = BitLinearKernel if use_kernel else BitLinear
 
-        self.w13 = Linear(
-            dim,
-            2 * hidden_dim,
-            bias=False,
-        )
-        self.w2 = Linear(
-            hidden_dim,
-            dim,
-            bias=False,
-        )
+        if int2_torch:
+            self.w13 = BitLinearInt2Torch(
+                dim, 2 * hidden_dim, bias=False,
+                row_splits=[hidden_dim, hidden_dim],
+            )
+            self.w2 = BitLinearInt2Torch(
+                hidden_dim, dim, bias=False,
+            )
+        else:
+            self.w13 = Linear(
+                dim,
+                2 * hidden_dim,
+                bias=False,
+            )
+            self.w2 = Linear(
+                hidden_dim,
+                dim,
+                bias=False,
+            )
         self.ffn_sub_norm = RMSNorm(hidden_dim, norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -228,12 +291,14 @@ class TransformerBlock(nn.Module):
             rope_theta=args.rope_theta,
             norm_eps=args.norm_eps,
             use_kernel=args.use_kernel,
+            int2_torch=getattr(args, "int2_torch", False),
         )
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=args.ffn_dim,
             norm_eps=args.norm_eps,
             use_kernel=args.use_kernel,
+            int2_torch=getattr(args, "int2_torch", False),
         )
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
