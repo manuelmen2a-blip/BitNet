@@ -64,9 +64,12 @@ if (TARGET ggml-base)
         ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/src
         ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/llama.cpp/ggml/src/ggml-cpu
     )
-    # gemm-config.h needs AVX to define PARALLEL_SIZE; apply to whole
-    # ggml-base (only affects this build, not upstream's other targets).
-    target_compile_options(ggml-base PRIVATE "-march=native")
+    # gemm-config.h gates ROW/COL/PARALLEL_SIZE on __AVX__/__AVX2__.
+    # -march=native is fastest on the build machine but not portable (CI
+    # runners differ and can hit undeclared AVX-512 intrinsics), so make it
+    # overridable from CI: -DBITNET_GGML_ARCH=avx2
+    set(BITNET_GGML_ARCH "native" CACHE STRING "ISA for ggml-base (native, avx2, ...)")
+    target_compile_options(ggml-base PRIVATE "-march=${BITNET_GGML_ARCH}")
     target_compile_definitions(ggml-base PRIVATE GGML_BUILD)
 endif()
 
