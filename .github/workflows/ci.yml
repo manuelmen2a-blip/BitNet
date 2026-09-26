@@ -37,6 +37,7 @@ jobs:
           -DCMAKE_CXX_COMPILER=clang++
           -DCMAKE_BUILD_TYPE=Release
           -DBITNET_GGML_ARCH=x86-64-v3
+          -DLLAMA_BUILD_COMMON=ON
           -DLLAMA_BUILD_EXAMPLES=ON
           -DLLAMA_BUILD_TOOLS=ON
 
