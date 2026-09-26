@@ -36,6 +36,8 @@ jobs:
           -DCMAKE_C_COMPILER=clang
           -DCMAKE_CXX_COMPILER=clang++
           -DCMAKE_BUILD_TYPE=Release
+          -DLLAMA_BUILD_EXAMPLES=ON
+          -DLLAMA_BUILD_TOOLS=ON
 
       - name: Build
         run: cmake --build build --config Release
